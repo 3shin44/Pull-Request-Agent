@@ -1,6 +1,7 @@
 # server.py
 import os
 import uvicorn
+from datetime import datetime, timezone
 from fastapi import FastAPI, BackgroundTasks
 from langchain_core.messages import HumanMessage
 
@@ -51,6 +52,17 @@ async def handle_ci_event(payload: dict, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_background_repair, error_report)
     
     return {"status": "accepted", "message": "Agent has taken over the task."}
+
+@app.get("/api/v1/health")
+async def health_check():
+    """
+    健康檢查接口，用於檢測服務是否存活
+    """
+    return {
+        "status": "healthy",
+        "message": "CI Trigger service is running up and good.",
+        "timestamp": datetime.now().astimezone().isoformat()
+    }
 
 if __name__ == "__main__":
     # 將 uvicorn 的執行目錄指向 src
