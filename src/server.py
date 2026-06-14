@@ -22,7 +22,7 @@ def run_background_repair(event_description: str):
     
     # 將外部傳進來的事件文字（例如："專案 A 的 pytest 失敗了，請修復"）包裝成 HumanMessage
     inputs = {"messages": [HumanMessage(content=event_description)]}
-    
+    print(f"開始投遞任務... {inputs}")
     try:
         # 使用從 agents.py 帶過來的安全遞迴上限 MAX_RECURSION
         final_state = agent_app.invoke(
@@ -67,9 +67,9 @@ async def health_check():
 if __name__ == "__main__":
     # 將 uvicorn 的執行目錄指向 src
     uvicorn.run(
-        "server:app",  
-        host="0.0.0.0", 
-        port=8000, 
+        "server:app",
+        host="0.0.0.0",
+        port=int(os.environ.get("SERVER_PORT", "8080")),
         reload=True,
         app_dir="src"       #  uvicorn 去哪裡找 server.py
     )

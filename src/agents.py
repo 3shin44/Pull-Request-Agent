@@ -1,10 +1,10 @@
 # agents.py
 from typing import Annotated, TypedDict, Sequence
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage, SystemMessage, AIMessage
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 from tools import tools
 import os
 import json
@@ -12,24 +12,30 @@ import json
 from dotenv import load_dotenv
 load_dotenv()
 
-# 1. 核心參數：限制 Agent 最大圖形迴圈次數
-# 1次循環包含：Agent思考(Node 1) + Tool執行(Node 2)。嘗試5次約需 11~15 次節點轉換。
+# 1. 核心參數
 MAX_RECURSION = int(os.environ["MAX_RECURSION"])
+# 滑動視窗大小：保留最近 N 條訊息（不含 SystemMessage）以避免超出 context window
+# 1 個工具循環 = AIMessage + ToolMessage = 2 條；預設 4 條 = 最近 2 次循環
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "4"))
 
 # 2. 情境專屬的 System Prompt
 CI_REPAIR_SYSTEM_PROMPT = SystemMessage(content=(
     "You are an automated CI Repair Agent operating in a Linux container (/workspace).\n"
-    "CRITICAL: Never chat. Never ask humans for help. You must ONLY respond with Tool Calls.\n\n"
-    
+    "CRITICAL: Never chat. Never ask humans for help. You must ONLY respond with a single raw JSON tool call.\n\n"
+
+    "# AVAILABLE TOOL\n"
+    "You have exactly ONE tool. To call it, output ONLY a raw JSON object — no markdown fences, no explanation, nothing else:\n"
+    '{"name": "execute_bash_in_container", "arguments": {"command": "<bash command>"}}\n\n'
+
     "# OBJECTIVE\n"
     "Fix the failing Python unit tests. The task is successful ONLY when the test command returns Exit Code 0.\n\n"
-    
+
     "# RULES & CONSTRAINTS\n"
     "1. Your very first action MUST be executing the test command to see the error log.\n"
     "2. Max retry limit: 5 loops of (Fix -> Test).\n"
     "3. When tests pass (Exit Code 0), stop calling tools and output a short summary of your fix.\n\n"
-    
-    "# COMMANDS TO USE VIA BASH TOOL\n"
+
+    "# COMMANDS TO USE\n"
     "- Run Tests: `python -m unittest discover -s tests`\n"
     "- View Files: `cat <filename>`\n"
     "- Edit Files: Use `cat << 'EOF' > filename` to rewrite or use `sed`."
@@ -39,22 +45,31 @@ CI_REPAIR_SYSTEM_PROMPT = SystemMessage(content=(
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
-# 4. 初始化模型並綁定工具
-llm = ChatOllama(
+# 4. 初始化模型（不透過 API 傳送 tools 參數以相容未啟用 --enable-auto-tool-choice 的 vLLM）
+# 工具 schema 已寫入 System Prompt；my_router 負責解析 JSON 文字工具呼叫
+llm = ChatOpenAI(
     model=os.environ["MODEL_NAME"],
     base_url=os.environ["MODEL_HOST"],
-    temperature=int(os.environ["MODEL_TEMERATURE"])
-).bind_tools(tools)
+    temperature=float(os.environ["MODEL_TEMPERATURE"]),
+    openai_api_key="dummy"
+)
 
-# 5. 定義圖節點：動態注入 System Prompt
+# 5. 定義圖節點：動態注入 System Prompt + 滑動視窗截斷
 def call_model(state: AgentState):
     current_messages = state['messages']
-    
-    # 💡 優化 1：不要每一輪都重複堆疊 SystemMessage，確保它只有「唯一一個」且在最前端
-    # 這能極大地挽救 7B 模型的短期記憶（Context Window）
+
+    # 移除重複的 SystemMessage，確保唯一且在最前端
     cleaned_messages = [m for m in current_messages if not isinstance(m, SystemMessage)]
+
+    # 滑動視窗：保留第一條（原始任務）+ 最近 MAX_HISTORY_MESSAGES-1 條
+    # 避免小模型超出 context window（Qwen2.5-3B 上限 2048 tokens）
+    if len(cleaned_messages) > MAX_HISTORY_MESSAGES:
+        task_message = cleaned_messages[:1]
+        recent_messages = cleaned_messages[-(MAX_HISTORY_MESSAGES - 1):]
+        cleaned_messages = task_message + recent_messages
+
     full_messages = [CI_REPAIR_SYSTEM_PROMPT] + cleaned_messages
-        
+
     response = llm.invoke(full_messages)
     return {"messages": [response]}
 
